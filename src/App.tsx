@@ -325,13 +325,13 @@ function App() {
   );
   const [telegramDefaultName, setTelegramDefaultName] = useState('');
   const [isCreatingSession, setIsCreatingSession] = useState(false);
+  const [isNameInitialized, setIsNameInitialized] = useState(false);
 
   const clearSessionState = () => {
     setSessionId('');
     setSessionName('');
     setParticipants([]);
     setExpenses([]);
-    setParticipantName(telegramDefaultName);
     setParticipantError('');
     setShareMessage('');
   };
@@ -342,7 +342,6 @@ function App() {
     setDraftSessionName(storedSession.name);
     setParticipants(storedSession.participants);
     setExpenses(storedSession.expenses);
-    setParticipantName(telegramDefaultName);
     setParticipantError('');
     setShareMessage('');
     setScreen('session');
@@ -420,9 +419,20 @@ function App() {
 
     if (defaultName) {
       setTelegramDefaultName(defaultName);
-      setParticipantName(defaultName);
     }
   }, []);
+
+  useEffect(() => {
+    if (
+      !isNameInitialized &&
+      !participantName &&
+      participants.length === 0 &&
+      telegramDefaultName
+    ) {
+      setParticipantName(telegramDefaultName);
+      setIsNameInitialized(true);
+    }
+  }, [isNameInitialized, participantName, participants.length, telegramDefaultName]);
 
   useEffect(() => {
     const loadInitialScreen = async () => {
@@ -588,6 +598,7 @@ function App() {
 
     setParticipantName('');
     setParticipantError('');
+    setIsNameInitialized(true);
     await reloadActiveSession();
   };
 
@@ -963,6 +974,7 @@ function App() {
                   value={participantName}
                   onChange={(event) => {
                     setParticipantName(event.target.value);
+                    setIsNameInitialized(true);
                     setParticipantError('');
                   }}
                   placeholder="Анна"
