@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useState } from 'react';
 import './App.css';
 
-type Screen = 'home' | 'new-session' | 'session' | 'new-expense';
+type Screen = 'home' | 'sessions' | 'new-session' | 'session' | 'new-expense';
 
 type Expense = {
   id: number;
@@ -16,6 +16,7 @@ type StoredSession = {
   name: string;
   participants: string[];
   expenses: Expense[];
+  updatedAt: number;
 };
 
 type Balance = {
@@ -40,7 +41,6 @@ type TelegramWebApp = {
     user?: TelegramUser;
   };
   ready?: () => void;
-  close?: () => void;
   openTelegramLink?: (url: string) => void;
 };
 
@@ -52,15 +52,119 @@ declare global {
   }
 }
 
-const storageKey = (id: string) => `kto-platit-session-${id}`;
+const sessionStoragePrefix = 'kto-platit-session-';
+const sessionIndexKey = 'kto-platit-sessions-index';
+const activeSessionKey = 'kto-platit-active-session-id';
+
+const storageKey = (id: string) => `${sessionStoragePrefix}${id}`;
 
 function generateSessionId() {
-  return Math.random().toString(36).slice(2, 8);
+  let id = Math.random().toString(36).slice(2, 8);
+
+  while (localStorage.getItem(storageKey(id))) {
+    id = Math.random().toString(36).slice(2, 8);
+  }
+
+  return id;
 }
 
 function getSessionIdFromUrl() {
   const match = window.location.pathname.match(/^\/session\/([^/]+)$/);
   return match ? decodeURIComponent(match[1]) : '';
+}
+
+function readSessionIds() {
+  const ids = new Set<string>();
+  const savedIds = localStorage.getItem(sessionIndexKey);
+
+  if (savedIds) {
+    try {
+      const parsedIds = JSON.parse(savedIds) as unknown;
+
+      if (Array.isArray(parsedIds)) {
+        parsedIds.forEach((id) => {
+          if (typeof id === 'string') {
+            ids.add(id);
+          }
+        });
+      }
+    } catch {
+      localStorage.removeItem(sessionIndexKey);
+    }
+  }
+
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+
+    if (key?.startsWith(sessionStoragePrefix)) {
+      ids.add(key.replace(sessionStoragePrefix, ''));
+    }
+  }
+
+  return Array.from(ids);
+}
+
+function writeSessionIds(ids: string[]) {
+  localStorage.setItem(sessionIndexKey, JSON.stringify(ids));
+}
+
+function readStoredSession(id: string): StoredSession | null {
+  const savedSession = localStorage.getItem(storageKey(id));
+
+  if (!savedSession) {
+    return null;
+  }
+
+  try {
+    const parsedSession = JSON.parse(savedSession) as Partial<StoredSession>;
+
+    if (!parsedSession.id || !parsedSession.name) {
+      return null;
+    }
+
+    return {
+      id: parsedSession.id,
+      name: parsedSession.name,
+      participants: Array.isArray(parsedSession.participants)
+        ? parsedSession.participants
+        : [],
+      expenses: Array.isArray(parsedSession.expenses)
+        ? parsedSession.expenses
+        : [],
+      updatedAt: parsedSession.updatedAt ?? 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function readAllStoredSessions() {
+  const sessions = readSessionIds()
+    .map((id) => readStoredSession(id))
+    .filter((session): session is StoredSession => Boolean(session))
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+
+  writeSessionIds(sessions.map((session) => session.id));
+
+  return sessions;
+}
+
+function saveStoredSession(session: StoredSession) {
+  localStorage.setItem(storageKey(session.id), JSON.stringify(session));
+  writeSessionIds([
+    session.id,
+    ...readSessionIds().filter((id) => id !== session.id),
+  ]);
+  localStorage.setItem(activeSessionKey, session.id);
+}
+
+function deleteStoredSession(id: string) {
+  localStorage.removeItem(storageKey(id));
+  writeSessionIds(readSessionIds().filter((sessionId) => sessionId !== id));
+
+  if (localStorage.getItem(activeSessionKey) === id) {
+    localStorage.removeItem(activeSessionKey);
+  }
 }
 
 function calculateSettlements(members: string[], expenses: Expense[]) {
@@ -160,16 +264,79 @@ function App() {
   const [participants, setParticipants] = useState<string[]>([]);
   const [participantError, setParticipantError] = useState('');
   const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [savedSessions, setSavedSessions] = useState<StoredSession[]>([]);
   const [expenseTitle, setExpenseTitle] = useState('');
   const [expenseAmount, setExpenseAmount] = useState('');
   const [expensePaidBy, setExpensePaidBy] = useState('');
   const [expenseSplitBetween, setExpenseSplitBetween] = useState<string[]>([]);
+  const [editingExpenseId, setEditingExpenseId] = useState<number | null>(null);
   const [shareMessage, setShareMessage] = useState('');
   const [isShareLinkVisible, setIsShareLinkVisible] = useState(false);
   const [telegramWebApp, setTelegramWebApp] = useState<TelegramWebApp | null>(
     null,
   );
   const [telegramDefaultName, setTelegramDefaultName] = useState('');
+
+  const clearSessionState = () => {
+    setSessionId('');
+    setSessionName('');
+    setParticipants([]);
+    setExpenses([]);
+    setParticipantName(telegramDefaultName);
+    setParticipantError('');
+    setShareMessage('');
+    setIsShareLinkVisible(false);
+  };
+
+  const refreshSavedSessions = () => {
+    setSavedSessions(readAllStoredSessions());
+  };
+
+  const openStoredSession = (id: string, shouldPushUrl = true) => {
+    const storedSession = readStoredSession(id);
+
+    if (!storedSession) {
+      refreshSavedSessions();
+      setScreen('sessions');
+      return false;
+    }
+
+    setSessionId(storedSession.id);
+    setSessionName(storedSession.name);
+    setDraftSessionName(storedSession.name);
+    setParticipants(storedSession.participants);
+    setExpenses(storedSession.expenses);
+    setParticipantName(telegramDefaultName);
+    setParticipantError('');
+    setShareMessage('');
+    setIsShareLinkVisible(false);
+    setScreen('session');
+    localStorage.setItem(activeSessionKey, storedSession.id);
+    refreshSavedSessions();
+
+    if (shouldPushUrl) {
+      window.history.pushState(null, '', `/session/${storedSession.id}`);
+    }
+
+    return true;
+  };
+
+  const openSessionsScreen = (shouldPushUrl = true) => {
+    refreshSavedSessions();
+    setScreen('sessions');
+    setShareMessage('');
+    setIsShareLinkVisible(false);
+
+    if (shouldPushUrl) {
+      window.history.pushState(null, '', '/');
+    }
+  };
+
+  const openNewSessionScreen = () => {
+    setDraftSessionName('');
+    setScreen('new-session');
+    window.history.pushState(null, '', '/');
+  };
 
   useEffect(() => {
     const webApp = window.Telegram?.WebApp;
@@ -194,34 +361,45 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const loadSessionFromUrl = () => {
+    const loadInitialScreen = () => {
       const idFromUrl = getSessionIdFromUrl();
 
-      if (!idFromUrl) {
+      if (idFromUrl && openStoredSession(idFromUrl, false)) {
         return;
       }
 
-      const savedSession = localStorage.getItem(storageKey(idFromUrl));
+      const activeSessionId = localStorage.getItem(activeSessionKey);
 
-      if (!savedSession) {
+      if (activeSessionId && openStoredSession(activeSessionId, false)) {
+        window.history.replaceState(null, '', `/session/${activeSessionId}`);
         return;
       }
 
-      const parsedSession = JSON.parse(savedSession) as StoredSession;
+      const sessions = readAllStoredSessions();
+      setSavedSessions(sessions);
 
-      setSessionId(parsedSession.id);
-      setSessionName(parsedSession.name);
-      setDraftSessionName(parsedSession.name);
-      setParticipants(parsedSession.participants);
-      setExpenses(parsedSession.expenses);
-      setScreen('session');
+      if (sessions.length > 0) {
+        setScreen('sessions');
+      }
     };
 
-    loadSessionFromUrl();
-    window.addEventListener('popstate', loadSessionFromUrl);
+    loadInitialScreen();
+
+    const handlePopState = () => {
+      const idFromUrl = getSessionIdFromUrl();
+
+      if (idFromUrl) {
+        openStoredSession(idFromUrl, false);
+        return;
+      }
+
+      openSessionsScreen(false);
+    };
+
+    window.addEventListener('popstate', handlePopState);
 
     return () => {
-      window.removeEventListener('popstate', loadSessionFromUrl);
+      window.removeEventListener('popstate', handlePopState);
     };
   }, []);
 
@@ -230,14 +408,14 @@ function App() {
       return;
     }
 
-    const session: StoredSession = {
+    saveStoredSession({
       id: sessionId,
       name: sessionName,
       participants,
       expenses,
-    };
-
-    localStorage.setItem(storageKey(sessionId), JSON.stringify(session));
+      updatedAt: Date.now(),
+    });
+    refreshSavedSessions();
   }, [sessionId, sessionName, participants, expenses]);
 
   const handleCreateSession = (event: FormEvent<HTMLFormElement>) => {
@@ -292,6 +470,18 @@ function App() {
     setExpenseAmount('');
     setExpensePaidBy(participants[0]);
     setExpenseSplitBetween(participants);
+    setEditingExpenseId(null);
+    setShareMessage('');
+    setIsShareLinkVisible(false);
+    setScreen('new-expense');
+  };
+
+  const openEditExpenseScreen = (expense: Expense) => {
+    setExpenseTitle(expense.title);
+    setExpenseAmount(expense.amount);
+    setExpensePaidBy(expense.paidBy);
+    setExpenseSplitBetween(expense.splitBetween);
+    setEditingExpenseId(expense.id);
     setShareMessage('');
     setIsShareLinkVisible(false);
     setScreen('new-expense');
@@ -318,20 +508,29 @@ function App() {
       return;
     }
 
-    setExpenses([
-      ...expenses,
-      {
-        id: Date.now(),
-        title,
-        amount,
-        paidBy: expensePaidBy,
-        splitBetween: expenseSplitBetween,
-      },
-    ]);
+    const savedExpense: Expense = {
+      id: editingExpenseId ?? Date.now(),
+      title,
+      amount,
+      paidBy: expensePaidBy,
+      splitBetween: expenseSplitBetween,
+    };
+
+    if (editingExpenseId) {
+      setExpenses(
+        expenses.map((expense) =>
+          expense.id === editingExpenseId ? savedExpense : expense,
+        ),
+      );
+    } else {
+      setExpenses([...expenses, savedExpense]);
+    }
+
+    setEditingExpenseId(null);
     setScreen('session');
   };
 
-  const handleShareSession = async () => {
+  const handleCopyShareLink = async (shareText: string) => {
     if (!sessionId) {
       return;
     }
@@ -341,37 +540,66 @@ function App() {
     setIsShareLinkVisible(true);
 
     try {
-      await navigator.clipboard.writeText(shareUrl);
+      await navigator.clipboard.writeText(shareText);
       setShareMessage('Ссылка скопирована');
     } catch {
-      setShareMessage('Не получилось скопировать автоматически. Скопируйте ссылку вручную');
+      setShareMessage(
+        'Не получилось скопировать автоматически. Скопируйте ссылку вручную',
+      );
     }
   };
 
-  const handleTelegramShareSession = () => {
+  const handleShareWithFriends = () => {
     if (!sessionId) {
       return;
     }
 
     const shareUrl = `${window.location.origin}/session/${sessionId}`;
+    const shareText = `Заходи в сессию «${sessionName}» — посчитаем, кто кому должен: ${shareUrl}`;
 
     setIsShareLinkVisible(true);
-    setShareMessage('');
 
-    if (!telegramWebApp?.openTelegramLink) {
-      void handleShareSession();
+    if (telegramWebApp?.openTelegramLink) {
+      const telegramShareUrl = `https://t.me/share/url?url=${encodeURIComponent(
+        shareUrl,
+      )}&text=${encodeURIComponent(shareText)}`;
+
+      setShareMessage('');
+      telegramWebApp.openTelegramLink(telegramShareUrl);
       return;
     }
 
-    const telegramShareUrl = `https://t.me/share/url?url=${encodeURIComponent(
-      shareUrl,
-    )}&text=${encodeURIComponent('Сессия “Кто платит”')}`;
-
-    telegramWebApp.openTelegramLink(telegramShareUrl);
+    void handleCopyShareLink(shareText);
   };
 
-  const handleCloseTelegramApp = () => {
-    telegramWebApp?.close?.();
+  const handleDeleteSession = (id: string) => {
+    const shouldDelete = window.confirm(
+      'Удалить сессию? Это действие нельзя отменить.',
+    );
+
+    if (!shouldDelete) {
+      return;
+    }
+
+    deleteStoredSession(id);
+    const sessions = readAllStoredSessions();
+    setSavedSessions(sessions);
+
+    if (id === sessionId) {
+      clearSessionState();
+      setScreen('sessions');
+      window.history.pushState(null, '', '/');
+    }
+  };
+
+  const handleDeleteExpense = (id: number) => {
+    const shouldDelete = window.confirm('Удалить расход?');
+
+    if (!shouldDelete) {
+      return;
+    }
+
+    setExpenses(expenses.filter((expense) => expense.id !== id));
   };
 
   const canAddExpense = participants.length >= 2;
@@ -385,8 +613,58 @@ function App() {
           <div className="screen__badge">Mini App</div>
           <h1>Кто платит</h1>
           <p>Разделяйте траты с друзьями без таблиц и споров</p>
-          <button type="button" onClick={() => setScreen('new-session')}>
+          <button type="button" onClick={openNewSessionScreen}>
             Создать сессию
+          </button>
+          {savedSessions.length > 0 && (
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => openSessionsScreen()}
+            >
+              Все сессии
+            </button>
+          )}
+        </section>
+      )}
+
+      {screen === 'sessions' && (
+        <section className="screen screen--session" aria-label="Все сессии">
+          <h1>Мои сессии</h1>
+
+          {savedSessions.length === 0 ? (
+            <p>Пока нет сохранённых сессий</p>
+          ) : (
+            <ul className="session-list">
+              {savedSessions.map((savedSession) => (
+                <li className="session-card" key={savedSession.id}>
+                  <h2>{savedSession.name}</h2>
+                  <p>
+                    Участников: {savedSession.participants.length} · Расходов:{' '}
+                    {savedSession.expenses.length}
+                  </p>
+                  <div className="session-actions">
+                    <button
+                      type="button"
+                      onClick={() => openStoredSession(savedSession.id)}
+                    >
+                      Открыть
+                    </button>
+                    <button
+                      className="danger-button"
+                      type="button"
+                      onClick={() => handleDeleteSession(savedSession.id)}
+                    >
+                      Удалить
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <button type="button" onClick={openNewSessionScreen}>
+            Создать новую сессию
           </button>
         </section>
       )}
@@ -415,19 +693,16 @@ function App() {
         <section className="screen screen--session" aria-label="Экран сессии">
           <div className="screen__badge">Сессия</div>
           <h1>{sessionName}</h1>
-          <button type="button" onClick={handleShareSession}>
-            Поделиться
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => openSessionsScreen()}
+          >
+            Все сессии
           </button>
-          {telegramWebApp && (
-            <>
-              <button type="button" onClick={handleTelegramShareSession}>
-                Поделиться в Telegram
-              </button>
-              <button type="button" onClick={handleCloseTelegramApp}>
-                Закрыть
-              </button>
-            </>
-          )}
+          <button type="button" onClick={handleShareWithFriends}>
+            Поделиться с друзьями
+          </button>
           {shareMessage && (
             <p
               className={
@@ -454,9 +729,27 @@ function App() {
               <ul className="expense-list">
                 {expenses.map((expense) => (
                   <li key={expense.id}>
-                    {expense.title} — {expense.amount} ₽ — заплатил{' '}
-                    {expense.paidBy} — делим на:{' '}
-                    {expense.splitBetween.join(', ')}
+                    <p>
+                      {expense.title} — {expense.amount} ₽ — заплатил{' '}
+                      {expense.paidBy} — делим на:{' '}
+                      {expense.splitBetween.join(', ')}
+                    </p>
+                    <div className="expense-actions">
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        onClick={() => openEditExpenseScreen(expense)}
+                      >
+                        Редактировать
+                      </button>
+                      <button
+                        className="danger-button"
+                        type="button"
+                        onClick={() => handleDeleteExpense(expense.id)}
+                      >
+                        Удалить
+                      </button>
+                    </div>
                   </li>
                 ))}
               </ul>
@@ -558,7 +851,7 @@ function App() {
 
       {screen === 'new-expense' && (
         <section className="screen screen--session" aria-label="Новый расход">
-          <h1>Новый расход</h1>
+          <h1>{editingExpenseId ? 'Редактировать расход' : 'Новый расход'}</h1>
           <form className="expense-form" onSubmit={handleSaveExpense}>
             <label htmlFor="expense-title">Название</label>
             <input
@@ -611,7 +904,9 @@ function App() {
               ))}
             </fieldset>
 
-            <button type="submit">Сохранить расход</button>
+            <button type="submit">
+              {editingExpenseId ? 'Сохранить изменения' : 'Сохранить расход'}
+            </button>
           </form>
         </section>
       )}

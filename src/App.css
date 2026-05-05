@@ -106,6 +106,28 @@
   transform: translateY(0);
 }
 
+.screen .secondary-button {
+  color: #14213d;
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(20, 33, 61, 0.16);
+  box-shadow: none;
+}
+
+.screen .secondary-button:hover {
+  background: #ffffff;
+  box-shadow: none;
+}
+
+.screen .danger-button {
+  background: #b42318;
+  box-shadow: none;
+}
+
+.screen .danger-button:hover {
+  background: #981b12;
+  box-shadow: none;
+}
+
 .session-form,
 .participant-form,
 .expense-form,
@@ -195,6 +217,7 @@
 .expense-list,
 .balance-list,
 .transfer-list,
+.session-list,
 .participant-list {
   width: 100%;
   display: flex;
@@ -208,7 +231,8 @@
 .expense-list li,
 .balance-list li,
 .transfer-list li,
-.participant-list li {
+.participant-list li,
+.session-card {
   min-height: 44px;
   display: flex;
   align-items: center;
@@ -220,9 +244,58 @@
   font-weight: 700;
 }
 
+.session-card {
+  width: 100%;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+}
+
+.session-card h2,
+.session-card p {
+  margin: 0;
+}
+
+.session-card p {
+  color: #475569;
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+.session-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.expense-actions,
+.session-actions {
+  width: 100%;
+}
+
+.expense-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.expense-actions button,
+.session-actions button {
+  min-height: 48px;
+  font-size: 15px;
+}
+
 .expense-list li,
 .transfer-list li {
   display: block;
+  line-height: 1.4;
+}
+
+.expense-list p {
+  margin: 0;
+  color: #14213d;
+  font-size: 16px;
   line-height: 1.4;
 }
 
@@ -305,6 +378,14 @@
   }
 
   .participant-form__row {
+    grid-template-columns: 1fr;
+  }
+
+  .session-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .expense-actions {
     grid-template-columns: 1fr;
   }
 }
