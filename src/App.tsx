@@ -1,10 +1,17 @@
 import { FormEvent, useEffect, useState } from 'react';
 import './App.css';
+import { supabase } from './lib/supabase';
 
-type Screen = 'home' | 'sessions' | 'new-session' | 'session' | 'new-expense';
+type Screen =
+  | 'home'
+  | 'sessions'
+  | 'new-session'
+  | 'session'
+  | 'new-expense'
+  | 'not-found';
 
 type Expense = {
-  id: number;
+  id: number | string;
   title: string;
   amount: string;
   paidBy: string;
@@ -17,6 +24,23 @@ type StoredSession = {
   participants: string[];
   expenses: Expense[];
   updatedAt: number;
+};
+
+type SessionRow = {
+  id: string;
+  name: string;
+};
+
+type ParticipantRow = {
+  name: string;
+};
+
+type ExpenseRow = {
+  id: number | string;
+  title: string;
+  amount: number | string;
+  paid_by: string;
+  participants: string[];
 };
 
 type Balance = {
@@ -52,20 +76,12 @@ declare global {
   }
 }
 
-const sessionStoragePrefix = 'kto-platit-session-';
-const sessionIndexKey = 'kto-platit-sessions-index';
+const recentSessionIdsKey = 'kto-platit-recent-session-ids';
 const activeSessionKey = 'kto-platit-active-session-id';
-
-const storageKey = (id: string) => `${sessionStoragePrefix}${id}`;
+const publicAppUrl = 'https://kto-platit-delta.vercel.app';
 
 function generateSessionId() {
-  let id = Math.random().toString(36).slice(2, 8);
-
-  while (localStorage.getItem(storageKey(id))) {
-    id = Math.random().toString(36).slice(2, 8);
-  }
-
-  return id;
+  return Math.random().toString(36).slice(2, 8);
 }
 
 function getSessionIdFromUrl() {
@@ -73,98 +89,119 @@ function getSessionIdFromUrl() {
   return match ? decodeURIComponent(match[1]) : '';
 }
 
-function readSessionIds() {
-  const ids = new Set<string>();
-  const savedIds = localStorage.getItem(sessionIndexKey);
+function readRecentSessionIds() {
+  const savedIds = localStorage.getItem(recentSessionIdsKey);
 
   if (savedIds) {
     try {
       const parsedIds = JSON.parse(savedIds) as unknown;
 
       if (Array.isArray(parsedIds)) {
-        parsedIds.forEach((id) => {
-          if (typeof id === 'string') {
-            ids.add(id);
-          }
-        });
+        return parsedIds.filter((id): id is string => typeof id === 'string');
       }
     } catch {
-      localStorage.removeItem(sessionIndexKey);
+      localStorage.removeItem(recentSessionIdsKey);
     }
   }
 
-  for (let index = 0; index < localStorage.length; index += 1) {
-    const key = localStorage.key(index);
-
-    if (key?.startsWith(sessionStoragePrefix)) {
-      ids.add(key.replace(sessionStoragePrefix, ''));
-    }
-  }
-
-  return Array.from(ids);
+  return [];
 }
 
-function writeSessionIds(ids: string[]) {
-  localStorage.setItem(sessionIndexKey, JSON.stringify(ids));
+function saveRecentSessionId(id: string) {
+  localStorage.setItem(
+    recentSessionIdsKey,
+    JSON.stringify([
+      id,
+      ...readRecentSessionIds().filter((sessionId) => sessionId !== id),
+    ]),
+  );
+  localStorage.setItem(activeSessionKey, id);
 }
 
-function readStoredSession(id: string): StoredSession | null {
-  const savedSession = localStorage.getItem(storageKey(id));
-
-  if (!savedSession) {
-    return null;
-  }
-
-  try {
-    const parsedSession = JSON.parse(savedSession) as Partial<StoredSession>;
-
-    if (!parsedSession.id || !parsedSession.name) {
-      return null;
-    }
-
-    return {
-      id: parsedSession.id,
-      name: parsedSession.name,
-      participants: Array.isArray(parsedSession.participants)
-        ? parsedSession.participants
-        : [],
-      expenses: Array.isArray(parsedSession.expenses)
-        ? parsedSession.expenses
-        : [],
-      updatedAt: parsedSession.updatedAt ?? 0,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function readAllStoredSessions() {
-  const sessions = readSessionIds()
-    .map((id) => readStoredSession(id))
-    .filter((session): session is StoredSession => Boolean(session))
-    .sort((a, b) => b.updatedAt - a.updatedAt);
-
-  writeSessionIds(sessions.map((session) => session.id));
-
-  return sessions;
-}
-
-function saveStoredSession(session: StoredSession) {
-  localStorage.setItem(storageKey(session.id), JSON.stringify(session));
-  writeSessionIds([
-    session.id,
-    ...readSessionIds().filter((id) => id !== session.id),
-  ]);
-  localStorage.setItem(activeSessionKey, session.id);
-}
-
-function deleteStoredSession(id: string) {
-  localStorage.removeItem(storageKey(id));
-  writeSessionIds(readSessionIds().filter((sessionId) => sessionId !== id));
+function removeRecentSessionId(id: string) {
+  localStorage.setItem(
+    recentSessionIdsKey,
+    JSON.stringify(readRecentSessionIds().filter((sessionId) => sessionId !== id)),
+  );
 
   if (localStorage.getItem(activeSessionKey) === id) {
     localStorage.removeItem(activeSessionKey);
   }
+}
+
+function normalizeStoredSession(
+  session: SessionRow,
+  participants: ParticipantRow[],
+  expenses: ExpenseRow[],
+): StoredSession {
+  return {
+    id: session.id,
+    name: session.name,
+    participants: participants.map((participant) => participant.name),
+    expenses: expenses.map((expense) => ({
+      id: expense.id,
+      title: expense.title,
+      amount: String(expense.amount),
+      paidBy: expense.paid_by,
+      splitBetween: Array.isArray(expense.participants)
+        ? expense.participants
+        : [],
+    })),
+    updatedAt: Date.now(),
+  };
+}
+
+async function loadSessionFromSupabase(id: string) {
+  const { data: session, error: sessionError } = await supabase
+    .from('sessions')
+    .select('id, name')
+    .eq('id', id)
+    .single<SessionRow>();
+
+  if (sessionError || !session) {
+    return null;
+  }
+
+  const [
+    { data: participants, error: participantsError },
+    { data: expenses, error: expensesError },
+  ] = await Promise.all([
+    supabase
+      .from('participants')
+      .select('name')
+      .eq('session_id', id)
+      .order('name'),
+    supabase
+      .from('expenses')
+      .select('id, title, amount, paid_by, participants')
+      .eq('session_id', id)
+      .order('id'),
+  ]);
+
+  if (participantsError || expensesError) {
+    throw participantsError || expensesError;
+  }
+
+  return normalizeStoredSession(
+    session,
+    (participants ?? []) as ParticipantRow[],
+    (expenses ?? []) as ExpenseRow[],
+  );
+}
+
+async function loadRecentSessionsFromSupabase() {
+  const sessions = await Promise.all(
+    readRecentSessionIds().map((id) => loadSessionFromSupabase(id)),
+  );
+
+  return sessions.filter((session): session is StoredSession => Boolean(session));
+}
+
+async function deleteSessionFromSupabase(id: string) {
+  await supabase.from('expenses').delete().eq('session_id', id);
+  await supabase.from('participants').delete().eq('session_id', id);
+  await supabase.from('sessions').delete().eq('id', id);
+  removeRecentSessionId(id);
 }
 
 function calculateSettlements(members: string[], expenses: Expense[]) {
@@ -255,6 +292,16 @@ function calculateSettlements(members: string[], expenses: Expense[]) {
   };
 }
 
+function formatMoney(amount: number | string, showPlus = false) {
+  const value = Math.round(Number(amount));
+  const sign = showPlus && value > 0 ? '+' : '';
+  const formattedValue = new Intl.NumberFormat('ru-RU', {
+    maximumFractionDigits: 0,
+  }).format(value);
+
+  return `${sign}${formattedValue} ₽`;
+}
+
 function App() {
   const [screen, setScreen] = useState<Screen>('home');
   const [sessionId, setSessionId] = useState('');
@@ -269,13 +316,15 @@ function App() {
   const [expenseAmount, setExpenseAmount] = useState('');
   const [expensePaidBy, setExpensePaidBy] = useState('');
   const [expenseSplitBetween, setExpenseSplitBetween] = useState<string[]>([]);
-  const [editingExpenseId, setEditingExpenseId] = useState<number | null>(null);
+  const [editingExpenseId, setEditingExpenseId] = useState<
+    number | string | null
+  >(null);
   const [shareMessage, setShareMessage] = useState('');
-  const [isShareLinkVisible, setIsShareLinkVisible] = useState(false);
   const [telegramWebApp, setTelegramWebApp] = useState<TelegramWebApp | null>(
     null,
   );
   const [telegramDefaultName, setTelegramDefaultName] = useState('');
+  const [isCreatingSession, setIsCreatingSession] = useState(false);
 
   const clearSessionState = () => {
     setSessionId('');
@@ -285,22 +334,9 @@ function App() {
     setParticipantName(telegramDefaultName);
     setParticipantError('');
     setShareMessage('');
-    setIsShareLinkVisible(false);
   };
 
-  const refreshSavedSessions = () => {
-    setSavedSessions(readAllStoredSessions());
-  };
-
-  const openStoredSession = (id: string, shouldPushUrl = true) => {
-    const storedSession = readStoredSession(id);
-
-    if (!storedSession) {
-      refreshSavedSessions();
-      setScreen('sessions');
-      return false;
-    }
-
+  const applySession = (storedSession: StoredSession) => {
     setSessionId(storedSession.id);
     setSessionName(storedSession.name);
     setDraftSessionName(storedSession.name);
@@ -309,10 +345,39 @@ function App() {
     setParticipantName(telegramDefaultName);
     setParticipantError('');
     setShareMessage('');
-    setIsShareLinkVisible(false);
     setScreen('session');
-    localStorage.setItem(activeSessionKey, storedSession.id);
-    refreshSavedSessions();
+    saveRecentSessionId(storedSession.id);
+  };
+
+  const refreshSavedSessions = async () => {
+    setSavedSessions(await loadRecentSessionsFromSupabase());
+  };
+
+  const reloadActiveSession = async () => {
+    if (!sessionId) {
+      return;
+    }
+
+    const storedSession = await loadSessionFromSupabase(sessionId);
+
+    if (storedSession) {
+      applySession(storedSession);
+      await refreshSavedSessions();
+    }
+  };
+
+  const openStoredSession = async (id: string, shouldPushUrl = true) => {
+    const storedSession = await loadSessionFromSupabase(id);
+
+    if (!storedSession) {
+      removeRecentSessionId(id);
+      await refreshSavedSessions();
+      setScreen('sessions');
+      return false;
+    }
+
+    applySession(storedSession);
+    await refreshSavedSessions();
 
     if (shouldPushUrl) {
       window.history.pushState(null, '', `/session/${storedSession.id}`);
@@ -321,11 +386,10 @@ function App() {
     return true;
   };
 
-  const openSessionsScreen = (shouldPushUrl = true) => {
-    refreshSavedSessions();
+  const openSessionsScreen = async (shouldPushUrl = true) => {
+    await refreshSavedSessions();
     setScreen('sessions');
     setShareMessage('');
-    setIsShareLinkVisible(false);
 
     if (shouldPushUrl) {
       window.history.pushState(null, '', '/');
@@ -361,21 +425,30 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const loadInitialScreen = () => {
+    const loadInitialScreen = async () => {
       const idFromUrl = getSessionIdFromUrl();
 
-      if (idFromUrl && openStoredSession(idFromUrl, false)) {
+      if (idFromUrl) {
+        const sessionFromUrl = await loadSessionFromSupabase(idFromUrl);
+
+        if (sessionFromUrl) {
+          applySession(sessionFromUrl);
+          await refreshSavedSessions();
+        } else {
+          setScreen('not-found');
+        }
+
         return;
       }
 
       const activeSessionId = localStorage.getItem(activeSessionKey);
 
-      if (activeSessionId && openStoredSession(activeSessionId, false)) {
+      if (activeSessionId && (await openStoredSession(activeSessionId, false))) {
         window.history.replaceState(null, '', `/session/${activeSessionId}`);
         return;
       }
 
-      const sessions = readAllStoredSessions();
+      const sessions = await loadRecentSessionsFromSupabase();
       setSavedSessions(sessions);
 
       if (sessions.length > 0) {
@@ -383,17 +456,26 @@ function App() {
       }
     };
 
-    loadInitialScreen();
+    void loadInitialScreen();
 
     const handlePopState = () => {
       const idFromUrl = getSessionIdFromUrl();
 
       if (idFromUrl) {
-        openStoredSession(idFromUrl, false);
+        void (async () => {
+          const sessionFromUrl = await loadSessionFromSupabase(idFromUrl);
+
+          if (sessionFromUrl) {
+            applySession(sessionFromUrl);
+            await refreshSavedSessions();
+          } else {
+            setScreen('not-found');
+          }
+        })();
         return;
       }
 
-      openSessionsScreen(false);
+      void openSessionsScreen(false);
     };
 
     window.addEventListener('popstate', handlePopState);
@@ -403,45 +485,80 @@ function App() {
     };
   }, []);
 
-  useEffect(() => {
-    if (!sessionId || !sessionName) {
+  const handleCreateSession = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    console.log('create session clicked');
+
+    if (isCreatingSession) {
+      console.log('create session ignored: request already in progress');
       return;
     }
-
-    saveStoredSession({
-      id: sessionId,
-      name: sessionName,
-      participants,
-      expenses,
-      updatedAt: Date.now(),
-    });
-    refreshSavedSessions();
-  }, [sessionId, sessionName, participants, expenses]);
-
-  const handleCreateSession = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
 
     const name = draftSessionName.trim();
+    console.log('session name:', name);
 
     if (!name) {
+      window.alert('Введите название сессии');
       return;
     }
 
-    const newSessionId = generateSessionId();
+    setIsCreatingSession(true);
 
-    setSessionId(newSessionId);
-    setSessionName(name);
-    setParticipants([]);
-    setExpenses([]);
-    setParticipantName(telegramDefaultName);
-    setParticipantError('');
-    setShareMessage('');
-    setIsShareLinkVisible(false);
-    setScreen('session');
-    window.history.pushState(null, '', `/session/${newSessionId}`);
+    const newSessionId = generateSessionId();
+    console.log('sessionId:', newSessionId);
+    const payload = { id: newSessionId, name };
+    console.log('sessions insert payload:', payload);
+
+    try {
+      const { data, error } = await supabase.from('sessions').insert(payload);
+      console.log('supabase insert result', { data, error });
+
+      if (error) {
+        console.error(error);
+
+        window.alert(
+          'Ошибка Supabase:\n' +
+            'message: ' +
+            error.message +
+            '\n' +
+            'details: ' +
+            (error.details || '-') +
+            '\n' +
+            'hint: ' +
+            (error.hint || '-') +
+            '\n' +
+            'code: ' +
+            (error.code || '-'),
+        );
+        return;
+      }
+
+      saveRecentSessionId(newSessionId);
+      applySession({
+        id: newSessionId,
+        name,
+        participants: [],
+        expenses: [],
+        updatedAt: Date.now(),
+      });
+      window.history.pushState(null, '', `/session/${newSessionId}`);
+
+      const storedSession = await loadSessionFromSupabase(newSessionId);
+
+      if (storedSession) {
+        applySession(storedSession);
+      }
+
+      await refreshSavedSessions();
+    } catch (err) {
+      console.error('create session exception', err);
+      window.alert(JSON.stringify(err, null, 2));
+    } finally {
+      setIsCreatingSession(false);
+    }
   };
 
-  const handleAddParticipant = (event: FormEvent<HTMLFormElement>) => {
+  const handleAddParticipant = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
     const name = participantName.trim();
@@ -460,9 +577,18 @@ function App() {
       return;
     }
 
-    setParticipants([...participants, name]);
+    const { error } = await supabase
+      .from('participants')
+      .insert({ session_id: sessionId, name });
+
+    if (error) {
+      window.alert('Не получилось добавить участника в Supabase');
+      return;
+    }
+
     setParticipantName('');
     setParticipantError('');
+    await reloadActiveSession();
   };
 
   const openNewExpenseScreen = () => {
@@ -472,7 +598,6 @@ function App() {
     setExpenseSplitBetween(participants);
     setEditingExpenseId(null);
     setShareMessage('');
-    setIsShareLinkVisible(false);
     setScreen('new-expense');
   };
 
@@ -483,7 +608,6 @@ function App() {
     setExpenseSplitBetween(expense.splitBetween);
     setEditingExpenseId(expense.id);
     setShareMessage('');
-    setIsShareLinkVisible(false);
     setScreen('new-expense');
   };
 
@@ -498,7 +622,7 @@ function App() {
     setExpenseSplitBetween([...expenseSplitBetween, participant]);
   };
 
-  const handleSaveExpense = (event: FormEvent<HTMLFormElement>) => {
+  const handleSaveExpense = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
     const title = expenseTitle.trim();
@@ -508,36 +632,43 @@ function App() {
       return;
     }
 
-    const savedExpense: Expense = {
-      id: editingExpenseId ?? Date.now(),
+    const savedExpense = {
+      session_id: sessionId,
       title,
       amount,
-      paidBy: expensePaidBy,
-      splitBetween: expenseSplitBetween,
+      paid_by: expensePaidBy,
+      participants: expenseSplitBetween,
     };
 
-    if (editingExpenseId) {
-      setExpenses(
-        expenses.map((expense) =>
-          expense.id === editingExpenseId ? savedExpense : expense,
-        ),
-      );
+    let error = null;
+
+    if (editingExpenseId !== null) {
+      const response = await supabase
+        .from('expenses')
+        .update(savedExpense)
+        .eq('id', editingExpenseId)
+        .eq('session_id', sessionId);
+
+      error = response.error;
     } else {
-      setExpenses([...expenses, savedExpense]);
+      const response = await supabase.from('expenses').insert(savedExpense);
+
+      error = response.error;
+    }
+
+    if (error) {
+      window.alert('Не получилось сохранить расход в Supabase');
+      return;
     }
 
     setEditingExpenseId(null);
-    setScreen('session');
+    await reloadActiveSession();
   };
 
   const handleCopyShareLink = async (shareText: string) => {
     if (!sessionId) {
       return;
     }
-
-    const shareUrl = `${window.location.origin}/session/${sessionId}`;
-
-    setIsShareLinkVisible(true);
 
     try {
       await navigator.clipboard.writeText(shareText);
@@ -554,10 +685,9 @@ function App() {
       return;
     }
 
-    const shareUrl = `${window.location.origin}/session/${sessionId}`;
-    const shareText = `Заходи в сессию «${sessionName}» — посчитаем, кто кому должен: ${shareUrl}`;
-
-    setIsShareLinkVisible(true);
+    const shareUrl = `${publicAppUrl}/session/${sessionId}`;
+    const shareText = `Заходи в сессию «${sessionName}» — посмотрим, кто кому должен 👇`;
+    const fallbackShareText = `${shareText}\n${shareUrl}`;
 
     if (telegramWebApp?.openTelegramLink) {
       const telegramShareUrl = `https://t.me/share/url?url=${encodeURIComponent(
@@ -569,10 +699,10 @@ function App() {
       return;
     }
 
-    void handleCopyShareLink(shareText);
+    void handleCopyShareLink(fallbackShareText);
   };
 
-  const handleDeleteSession = (id: string) => {
+  const handleDeleteSession = async (id: string) => {
     const shouldDelete = window.confirm(
       'Удалить сессию? Это действие нельзя отменить.',
     );
@@ -581,30 +711,45 @@ function App() {
       return;
     }
 
-    deleteStoredSession(id);
-    const sessions = readAllStoredSessions();
+    await deleteSessionFromSupabase(id);
+    const sessions = await loadRecentSessionsFromSupabase();
     setSavedSessions(sessions);
 
     if (id === sessionId) {
-      clearSessionState();
-      setScreen('sessions');
-      window.history.pushState(null, '', '/');
+      if (sessions.length > 0) {
+        applySession(sessions[0]);
+        window.history.pushState(null, '', `/session/${sessions[0].id}`);
+      } else {
+        clearSessionState();
+        setScreen('sessions');
+        window.history.pushState(null, '', '/');
+      }
     }
   };
 
-  const handleDeleteExpense = (id: number) => {
+  const handleDeleteExpense = async (id: number | string) => {
     const shouldDelete = window.confirm('Удалить расход?');
 
     if (!shouldDelete) {
       return;
     }
 
-    setExpenses(expenses.filter((expense) => expense.id !== id));
+    const { error } = await supabase
+      .from('expenses')
+      .delete()
+      .eq('id', id)
+      .eq('session_id', sessionId);
+
+    if (error) {
+      window.alert('Не получилось удалить расход в Supabase');
+      return;
+    }
+
+    await reloadActiveSession();
   };
 
   const canAddExpense = participants.length >= 2;
   const settlements = calculateSettlements(participants, expenses);
-  const shareUrl = sessionId ? `${window.location.origin}/session/${sessionId}` : '';
 
   return (
     <main className="app">
@@ -620,7 +765,7 @@ function App() {
             <button
               className="secondary-button"
               type="button"
-              onClick={() => openSessionsScreen()}
+              onClick={() => void openSessionsScreen()}
             >
               Все сессии
             </button>
@@ -646,14 +791,14 @@ function App() {
                   <div className="session-actions">
                     <button
                       type="button"
-                      onClick={() => openStoredSession(savedSession.id)}
+                      onClick={() => void openStoredSession(savedSession.id)}
                     >
                       Открыть
                     </button>
                     <button
                       className="danger-button"
                       type="button"
-                      onClick={() => handleDeleteSession(savedSession.id)}
+                      onClick={() => void handleDeleteSession(savedSession.id)}
                     >
                       Удалить
                     </button>
@@ -663,6 +808,16 @@ function App() {
             </ul>
           )}
 
+          <button type="button" onClick={openNewSessionScreen}>
+            Создать новую сессию
+          </button>
+        </section>
+      )}
+
+      {screen === 'not-found' && (
+        <section className="screen" aria-label="Сессия не найдена">
+          <h1>Сессия не найдена</h1>
+          <p>Проверьте ссылку или попросите отправить её ещё раз.</p>
           <button type="button" onClick={openNewSessionScreen}>
             Создать новую сессию
           </button>
@@ -684,7 +839,9 @@ function App() {
               placeholder="Вечер"
               autoFocus
             />
-            <button type="submit">Создать</button>
+            <button type="submit" disabled={isCreatingSession}>
+              {isCreatingSession ? 'Создаём...' : 'Создать'}
+            </button>
           </form>
         </section>
       )}
@@ -696,7 +853,7 @@ function App() {
           <button
             className="secondary-button"
             type="button"
-            onClick={() => openSessionsScreen()}
+            onClick={() => void openSessionsScreen()}
           >
             Все сессии
           </button>
@@ -714,13 +871,6 @@ function App() {
               {shareMessage}
             </p>
           )}
-          {isShareLinkVisible && (
-            <div className="share-link">
-              <h2>Ссылка на сессию</h2>
-              <input type="text" value={shareUrl} readOnly />
-            </div>
-          )}
-
           {expenses.length === 0 ? (
             <p>Пока нет расходов</p>
           ) : (
@@ -730,7 +880,7 @@ function App() {
                 {expenses.map((expense) => (
                   <li key={expense.id}>
                     <p>
-                      {expense.title} — {expense.amount} ₽ — заплатил{' '}
+                      {expense.title} — {formatMoney(expense.amount)} — заплатил{' '}
                       {expense.paidBy} — делим на:{' '}
                       {expense.splitBetween.join(', ')}
                     </p>
@@ -745,7 +895,7 @@ function App() {
                       <button
                         className="danger-button"
                         type="button"
-                        onClick={() => handleDeleteExpense(expense.id)}
+                        onClick={() => void handleDeleteExpense(expense.id)}
                       >
                         Удалить
                       </button>
@@ -779,8 +929,7 @@ function App() {
                               : ''
                         }
                       >
-                        {balance.amount > 0 ? '+' : ''}
-                        {balance.amount} ₽
+                        {formatMoney(balance.amount, true)}
                       </span>
                     </li>
                   ))}
@@ -793,8 +942,8 @@ function App() {
                   <ul className="transfer-list">
                     {settlements.transfers.map((transfer) => (
                       <li key={`${transfer.from}-${transfer.to}`}>
-                        {transfer.from} платит {transfer.to}{' '}
-                        {transfer.amount} ₽
+                        {transfer.from} → {transfer.to}:{' '}
+                        {formatMoney(transfer.amount)}
                       </li>
                     ))}
                   </ul>
@@ -851,7 +1000,9 @@ function App() {
 
       {screen === 'new-expense' && (
         <section className="screen screen--session" aria-label="Новый расход">
-          <h1>{editingExpenseId ? 'Редактировать расход' : 'Новый расход'}</h1>
+          <h1>
+            {editingExpenseId !== null ? 'Редактировать расход' : 'Новый расход'}
+          </h1>
           <form className="expense-form" onSubmit={handleSaveExpense}>
             <label htmlFor="expense-title">Название</label>
             <input
@@ -905,7 +1056,9 @@ function App() {
             </fieldset>
 
             <button type="submit">
-              {editingExpenseId ? 'Сохранить изменения' : 'Сохранить расход'}
+              {editingExpenseId !== null
+                ? 'Сохранить изменения'
+                : 'Сохранить расход'}
             </button>
           </form>
         </section>
